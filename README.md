@@ -1,5 +1,8 @@
 # Most-Active Stocks ELT Pipeline
 
+[![CI](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/ci.yml)
+[![Daily pipeline](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/daily.yml/badge.svg)](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/daily.yml)
+
 A daily batch pipeline that captures the most actively traded US stocks from Yahoo Finance, validates the data, and builds up a queryable history in a DuckDB warehouse.
 
 It started as a class project, a single Jupyter notebook that scraped CNN and Yahoo with Selenium and BeautifulSoup and wrote a SQLite table. This repo rebuilds it as a production-style pipeline. The original is preserved in [`legacy/`](legacy/) for comparison.
@@ -34,10 +37,11 @@ flowchart LR
 | Yahoo HTML parsing broke whenever the page markup changed | Structured JSON via `yfinance`, with field mapping for both payload shapes |
 | `DROP TABLE` on every run destroyed all history | Partition overwrite by `snapshot_date`: reruns are idempotent and history accumulates |
 | No retries | Exponential backoff on every network call |
-| No data validation | Quality checks (row count, uniqueness, ticker format, positive prices, completeness) block bad batches |
+| No data validation | Quality checks (row count, uniqueness, ticker format, positive prices, completeness, stale quotes) block or flag bad batches |
+| Ran only when someone opened the notebook | Runs automatically every weekday on GitHub Actions |
 | Dates were never stored | Each row is stamped with the **New York trading date** from the quote timestamp |
 | One 400-line notebook cell | Separate extract / transform / validate / load modules, a CLI, and config via environment variables |
-| No tests | 18 pytest tests with Yahoo mocked, run in GitHub Actions CI with ruff linting |
+| No tests | 19 pytest tests with Yahoo mocked, run in GitHub Actions CI with ruff linting |
 
 ## Quickstart
 
@@ -64,6 +68,10 @@ Import the data from the original notebook (one time):
 ```bash
 python scripts/backfill_legacy.py legacy/StocksDatabase.db --as-of 2026-10-09
 ```
+
+### Scheduled runs
+
+[`.github/workflows/daily.yml`](.github/workflows/daily.yml) runs the pipeline every weekday after the market close (21:37 UTC). It commits the updated warehouse to [`warehouse/`](warehouse/), so the history builds up in the repo, and writes the run status and the day's snapshot to the job summary. [`warehouse/latest.csv`](warehouse/latest.csv) always holds the most recent snapshot. You can also start a run manually from the Actions tab with **Run workflow**.
 
 ### Docker
 
@@ -94,6 +102,7 @@ docker run --rm -v "$(pwd)/data:/data" stock-pipeline
 | ≤ 50% of rows missing open price | error |
 | Individual missing open price | warning |
 | P/E outside (0, 10,000) | warning |
+| Ticker's last quote is older than the batch date (`stale_quote`) | warning |
 
 A missing P/E is valid: companies with negative trailing earnings (e.g. INTC) don't have one, so it's stored as NULL rather than treated as an error.
 
@@ -102,7 +111,8 @@ A missing P/E is valid: companies with negative trailing earnings (e.g. INTC) do
 - [x] Stabilize extraction, add retries and logging
 - [x] Modular ELT structure, raw and clean layers, idempotent loads
 - [x] Data quality checks, tests, CI, Docker
-- [ ] Schedule daily after market close (Dagster or Airflow; GitHub Actions cron as a lightweight option)
+- [x] Daily schedule after market close (GitHub Actions cron)
+- [ ] Move orchestration to Dagster or Airflow
 - [ ] dbt models on top of `daily_quotes` (ticker dimension, rolling volume metrics)
 - [ ] Move storage to cloud object storage (Parquet on S3/GCS) or MotherDuck
 - [ ] Dashboard (Streamlit or Evidence)
