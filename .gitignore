@@ -8,3 +8,4 @@ data/
 *.duckdb
 *.duckdb.wal
 .ipynb_checkpoints/
+stocks.txt
