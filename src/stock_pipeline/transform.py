@@ -31,6 +31,7 @@ class QuoteRow:
     pe_ratio: float | None   # NULL is legitimate: no P/E when earnings are negative
     volume: int | None
     rank: int                # position in the most-actives list (1 = most active)
+    quote_date: date | None = None  # trading date of this ticker's own last quote
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -79,7 +80,7 @@ def transform(records: list[dict[str, Any]], extracted_at: datetime) -> list[Quo
         seen.add(ticker)
         company = _first(raw, FIELD_KEYS["company"])
         rows.append(QuoteRow(
-            snapshot_date=market_date(raw, extracted_at),
+            snapshot_date=market_date(raw, extracted_at),  # replaced with batch date below
             ticker=ticker,
             company=str(company) if company else None,
             open_price=to_float(_first(raw, FIELD_KEYS["open_price"])),
@@ -87,5 +88,14 @@ def transform(records: list[dict[str, Any]], extracted_at: datetime) -> list[Quo
             pe_ratio=to_float(_first(raw, FIELD_KEYS["pe_ratio"])),
             volume=to_int(_first(raw, FIELD_KEYS["volume"])),
             rank=len(rows) + 1,
+            quote_date=market_date(raw, extracted_at),
         ))
+
+    # One run = one trading day. A ticker that hasn't traded today (halted, thin
+    # volume) still carries an older quote time; it belongs to *this* run's
+    # snapshot, not to a past day's partition. Its own date is kept in quote_date.
+    if rows:
+        batch_date = max(r.quote_date for r in rows)
+        for r in rows:
+            r.snapshot_date = batch_date
     return rows

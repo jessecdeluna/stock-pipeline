@@ -40,6 +40,9 @@ def validate(rows: list[QuoteRow], min_rows: int) -> list[Issue]:
             issues.append(Issue("error", "open_price_positive", f"{r.ticker} open={r.open_price}"))
         if r.avg_volume is not None and r.avg_volume < 0:
             issues.append(Issue("error", "avg_volume_non_negative", f"{r.ticker} avg_vol={r.avg_volume}"))
+        if r.quote_date and r.quote_date < r.snapshot_date:
+            issues.append(Issue("warning", "stale_quote",
+                                f"{r.ticker} last quoted {r.quote_date}, batch date {r.snapshot_date}"))
         if r.pe_ratio is not None and not (0 < r.pe_ratio < 10_000):
             issues.append(Issue("warning", "pe_ratio_range", f"{r.ticker} P/E={r.pe_ratio}"))
 

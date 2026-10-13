@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS daily_quotes (
     PRIMARY KEY (snapshot_date, ticker)
 );
 
+ALTER TABLE daily_quotes ADD COLUMN IF NOT EXISTS quote_date DATE;
+
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     run_id         VARCHAR PRIMARY KEY,
     started_at     TIMESTAMPTZ NOT NULL,
@@ -92,9 +94,11 @@ def load_clean(con: duckdb.DuckDBPyConnection, run_id: str, loaded_at: datetime,
     try:
         con.executemany("DELETE FROM daily_quotes WHERE snapshot_date = ?", [(d,) for d in dates])
         con.executemany(
-            "INSERT INTO daily_quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO daily_quotes (snapshot_date, ticker, company, open_price, avg_volume,
+                   pe_ratio, volume, rank, run_id, loaded_at, quote_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(r.snapshot_date, r.ticker, r.company, r.open_price, r.avg_volume,
-              r.pe_ratio, r.volume, r.rank, run_id, loaded_at) for r in rows],
+              r.pe_ratio, r.volume, r.rank, run_id, loaded_at, r.quote_date) for r in rows],
         )
         con.execute("COMMIT")
     except Exception:

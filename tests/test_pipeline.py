@@ -102,3 +102,17 @@ def test_export_csv_matches_legacy_format(monkeypatch, settings, sample_quotes, 
     assert lines[0] == "Ticker,OpenPrice,AvgVolume,PERatio"
     assert lines[1] == "NVDA,221.59,151325148,34.24"
     assert lines[4] == "INTC,102.34,123393238,"
+
+
+def test_stale_quote_stays_in_todays_snapshot(monkeypatch, settings, sample_quotes):
+    """Regression: 25 loaded / 24 exported when one ticker had an older quote time."""
+    quotes = [dict(q) for q in sample_quotes]
+    quotes[2]["regularMarketTime"] -= 3 * 86_400  # AAPL last traded 3 days earlier
+    monkeypatch.setattr(ex.yf, "screen", lambda *a, **k: {"quotes": quotes})
+    summary = pipeline.run(settings)
+
+    assert summary["status"] == "success"
+    assert any("stale_quote" in i and "AAPL" in i for i in summary["issues"])
+    assert query(settings, "SELECT count(DISTINCT snapshot_date) FROM daily_quotes")[0][0] == 1
+    assert query(settings, "SELECT count(*) FROM latest_quotes")[0][0] == 5
+    assert query(settings, "SELECT quote_date < snapshot_date FROM daily_quotes WHERE ticker='AAPL'")[0][0]
