@@ -1,0 +1,108 @@
+# Most-Active Stocks ELT Pipeline
+
+A daily batch pipeline that captures the most actively traded US stocks from Yahoo Finance, validates the data, and builds up a queryable history in a DuckDB warehouse.
+
+It started as a class project, a single Jupyter notebook that scraped CNN and Yahoo with Selenium and BeautifulSoup and wrote a SQLite table. This repo rebuilds it as a production-style pipeline. The original is preserved in [`legacy/`](legacy/) for comparison.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Yahoo Finance<br/>most_actives screener] -->|retry + backoff| B(extract.py)
+    A2[Per-ticker lookup<br/>fallback list] -.->|if screener fails| B
+    B --> R[(raw.quotes_raw<br/>JSON payloads, append-only)]
+    B --> C(transform.py<br/>typing, dedupe, market date)
+    C --> D{validate.py<br/>data quality checks}
+    D -->|errors| X[run marked failed_validation<br/>clean table untouched]
+    D -->|pass| E[(daily_quotes<br/>PK snapshot_date, ticker)]
+    E --> V[[latest_quotes view]]
+    B & D & E --> P[(pipeline_runs<br/>audit log)]
+```
+
+| Layer | Table | Purpose |
+|---|---|---|
+| Raw | `raw.quotes_raw` | Every payload exactly as received, for replay and debugging |
+| Clean | `daily_quotes` | Typed rows, one per trading day per ticker, full history |
+| Serving | `latest_quotes` (view) | Most recent snapshot, ranked |
+| Ops | `pipeline_runs` | Status, data source, row counts, and quality issues for every run |
+
+## What changed from v1
+
+| Problem in the notebook | Fix |
+|---|---|
+| CNN Selenium scrape failed on every run and **silently** used a hardcoded ticker list | Yahoo screener API returns tickers and stats in one call; any fallback is logged and recorded as `source='fallback'` |
+| Yahoo HTML parsing broke whenever the page markup changed | Structured JSON via `yfinance`, with field mapping for both payload shapes |
+| `DROP TABLE` on every run destroyed all history | Partition overwrite by `snapshot_date`: reruns are idempotent and history accumulates |
+| No retries | Exponential backoff on every network call |
+| No data validation | Quality checks (row count, uniqueness, ticker format, positive prices, completeness) block bad batches |
+| Dates were never stored | Each row is stamped with the **New York trading date** from the quote timestamp |
+| One 400-line notebook cell | Separate extract / transform / validate / load modules, a CLI, and config via environment variables |
+| No tests | 18 pytest tests with Yahoo mocked, run in GitHub Actions CI with ruff linting |
+
+## Quickstart
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
+pip install -e ".[dev]"
+
+pytest                           # run the test suite (no network needed)
+stock-pipeline                   # run the pipeline once -> data/stocks.duckdb
+stock-pipeline --export-csv stocks.txt   # also write the original stocks.txt format
+```
+
+Inspect the warehouse:
+
+```bash
+python -c "import duckdb; duckdb.connect('data/stocks.duckdb').sql('SELECT * FROM latest_quotes').show()"
+```
+
+Or install the [DuckDB CLI](https://duckdb.org/docs/installation/) and run `duckdb data/stocks.duckdb < sql/analysis.sql`.
+
+Import the data from the original notebook (one time):
+
+```bash
+python scripts/backfill_legacy.py legacy/StocksDatabase.db --as-of 2026-10-09
+```
+
+### Docker
+
+```bash
+docker build -t stock-pipeline .
+docker run --rm -v "$(pwd)/data:/data" stock-pipeline
+```
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STOCKS_DB_PATH` | `data/stocks.duckdb` | Warehouse file |
+| `STOCKS_SCREENER` | `most_actives` | Any Yahoo predefined screener (`day_gainers`, `day_losers`, …) |
+| `STOCKS_TOP_N` | `25` | How many stocks to capture |
+| `STOCKS_MIN_ROWS` | `5` | Fewer rows than this fails validation |
+| `STOCKS_MAX_RETRIES` | `3` | Attempts per network call |
+| `STOCKS_FALLBACK_TICKERS` | 10 large caps | Comma-separated list used if the screener is down |
+
+## Data quality rules
+
+| Check | Severity |
+|---|---|
+| At least `STOCKS_MIN_ROWS` rows | error |
+| Tickers unique and correctly formatted | error |
+| Open price > 0 | error |
+| Average volume ≥ 0 | error |
+| ≤ 50% of rows missing open price | error |
+| Individual missing open price | warning |
+| P/E outside (0, 10,000) | warning |
+
+A missing P/E is valid: companies with negative trailing earnings (e.g. INTC) don't have one, so it's stored as NULL rather than treated as an error.
+
+## Roadmap
+
+- [x] Stabilize extraction, add retries and logging
+- [x] Modular ELT structure, raw and clean layers, idempotent loads
+- [x] Data quality checks, tests, CI, Docker
+- [ ] Schedule daily after market close (Dagster or Airflow; GitHub Actions cron as a lightweight option)
+- [ ] dbt models on top of `daily_quotes` (ticker dimension, rolling volume metrics)
+- [ ] Move storage to cloud object storage (Parquet on S3/GCS) or MotherDuck
+- [ ] Dashboard (Streamlit or Evidence)
