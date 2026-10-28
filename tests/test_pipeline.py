@@ -1,17 +1,17 @@
 """End-to-end tests with Yahoo mocked out, so CI never touches the network."""
 
-import duckdb
 import pytest
 from conftest import screener_quote
 
 from stock_pipeline import extract as ex
 from stock_pipeline import pipeline
 from stock_pipeline.config import Settings
+from stock_pipeline.load import connect
 
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings(db_path=str(tmp_path / "test.duckdb"), top_n=10, min_rows=3,
+    return Settings(warehouse_dir=str(tmp_path / "warehouse"), top_n=10, min_rows=3,
                     max_retries=1, fallback_tickers=("AAPL", "MSFT", "NVDA"))
 
 
@@ -21,7 +21,7 @@ def no_sleep(monkeypatch):
 
 
 def query(settings, sql):
-    con = duckdb.connect(settings.db_path)
+    con = connect(settings.warehouse_dir)
     try:
         return con.execute(sql).fetchall()
     finally:
@@ -34,7 +34,7 @@ def test_successful_run_loads_raw_and_clean(monkeypatch, settings, sample_quotes
 
     assert summary["status"] == "success" and summary["source"] == "screener"
     assert query(settings, "SELECT count(*) FROM daily_quotes")[0][0] == 5
-    assert query(settings, "SELECT count(*) FROM raw.quotes_raw")[0][0] == 5
+    assert query(settings, "SELECT count(*) FROM raw_quotes")[0][0] == 5
     assert query(settings, "SELECT status FROM pipeline_runs")[0][0] == "success"
 
 
@@ -90,14 +90,14 @@ def test_bad_batch_is_not_loaded(monkeypatch, settings):
 
     assert summary["status"] == "failed_validation"
     assert query(settings, "SELECT count(*) FROM daily_quotes")[0][0] == 0
-    assert query(settings, "SELECT count(*) FROM raw.quotes_raw")[0][0] == 3  # raw kept for debugging
+    assert query(settings, "SELECT count(*) FROM raw_quotes")[0][0] == 3  # raw kept for debugging
 
 
 def test_export_csv_matches_legacy_format(monkeypatch, settings, sample_quotes, tmp_path):
     monkeypatch.setattr(ex.yf, "screen", lambda *a, **k: {"quotes": sample_quotes})
     pipeline.run(settings)
     out = tmp_path / "stocks.txt"
-    pipeline.export_csv(settings.db_path, str(out))
+    pipeline.export_csv(settings.warehouse_dir, str(out))
     lines = out.read_text().splitlines()
     assert lines[0] == "Ticker,OpenPrice,AvgVolume,PERatio"
     assert lines[1] == "NVDA,221.59,151325148,34.24"

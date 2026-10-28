@@ -2,13 +2,13 @@ name: Daily pipeline
 
 on:
   schedule:
-    # 21:37 UTC, Mon-Fri = 5:37pm ET in summer / 4:37pm ET in winter, after the 4pm close.
-    # GitHub may start scheduled runs a few minutes late.
+    # 21:37 UTC, Mon-Fri = 4:37pm Central in summer / 3:37pm Central in winter, after the close.
+    # GitHub often starts scheduled runs late (2-3 hours is common); data is still end-of-day.
     - cron: "37 21 * * 1-5"
   workflow_dispatch:   # adds a "Run workflow" button on the Actions tab
 
 permissions:
-  contents: write      # lets the job commit the updated warehouse back to the repo
+  contents: write      # lets the job commit the new warehouse files back to the repo
 
 concurrency:
   group: daily-pipeline
@@ -18,7 +18,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      STOCKS_DB_PATH: warehouse/stocks.duckdb
+      STOCKS_WAREHOUSE_DIR: warehouse
     steps:
       - uses: actions/checkout@v4
 
@@ -34,33 +34,15 @@ jobs:
 
       - name: Print today's snapshot to the job summary
         if: always()
-        run: |
-          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          import duckdb, os
+        run: stock-query --summary >> "$GITHUB_STEP_SUMMARY"
 
-          def table(con, title, sql):
-              rel = con.sql(sql)
-              print(f"### {title}\n")
-              print("| " + " | ".join(rel.columns) + " |")
-              print("|" + "---|" * len(rel.columns))
-              for row in rel.fetchall():
-                  print("| " + " | ".join("" if v is None else str(v) for v in row) + " |")
-              print()
-
-          if os.path.exists("warehouse/stocks.duckdb"):
-              con = duckdb.connect("warehouse/stocks.duckdb", read_only=True)
-              table(con, "Latest run", "SELECT run_id, status, source, rows_loaded, issues "
-                                       "FROM pipeline_runs ORDER BY started_at DESC LIMIT 1")
-              table(con, "Latest snapshot", "SELECT snapshot_date, rank, ticker, open_price, "
-                                            "avg_volume, pe_ratio FROM latest_quotes")
-          EOF
-
-      - name: Commit updated warehouse
+      - name: Commit new warehouse files
         if: always()   # also commit failed runs so pipeline_runs keeps the audit trail
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add warehouse/
+          git add -A warehouse/
           git diff --cached --quiet && echo "No changes" && exit 0
-          git commit -m "Daily snapshot $(date -u +%Y-%m-%d)"
+          DAY=$(stock-query --format plain "SELECT max(snapshot_date) FROM daily_quotes")
+          git commit -m "Daily snapshot ${DAY}"
           git push

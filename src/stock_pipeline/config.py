@@ -19,7 +19,9 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Settings:
-    db_path: str = field(default_factory=lambda: os.getenv("STOCKS_DB_PATH", "data/stocks.duckdb"))
+    # Local runs write to data/warehouse (git-ignored); the scheduled GitHub job sets
+    # STOCKS_WAREHOUSE_DIR=warehouse, the folder committed to the repo.
+    warehouse_dir: str = field(default_factory=lambda: os.getenv("STOCKS_WAREHOUSE_DIR", "data/warehouse"))
     screener: str = field(default_factory=lambda: os.getenv("STOCKS_SCREENER", "most_actives"))
     top_n: int = field(default_factory=lambda: int(os.getenv("STOCKS_TOP_N", "25")))
     min_rows: int = field(default_factory=lambda: int(os.getenv("STOCKS_MIN_ROWS", "5")))

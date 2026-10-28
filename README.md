@@ -3,7 +3,7 @@
 [![CI](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/ci.yml)
 [![Daily pipeline](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/daily.yml/badge.svg)](https://github.com/jessecdeluna/stock-pipeline/actions/workflows/daily.yml)
 
-A daily batch pipeline that captures the most actively traded US stocks from Yahoo Finance, validates the data, and builds up a queryable history in a DuckDB warehouse.
+A daily batch pipeline that captures the most actively traded US stocks from Yahoo Finance, validates the data, and builds up a history of daily Parquet files that you query with SQL through DuckDB.
 
 It started as a class project, a single Jupyter notebook that scraped CNN and Yahoo with Selenium and BeautifulSoup and wrote a SQLite table. This repo rebuilds it as a production-style pipeline. The original is preserved in [`legacy/`](legacy/) for comparison.
 
@@ -13,21 +13,33 @@ It started as a class project, a single Jupyter notebook that scraped CNN and Ya
 flowchart LR
     A[Yahoo Finance<br/>most_actives screener] -->|retry + backoff| B(extract.py)
     A2[Per-ticker lookup<br/>fallback list] -.->|if screener fails| B
-    B --> R[(raw.quotes_raw<br/>JSON payloads, append-only)]
+    B --> R[(raw/*.jsonl.gz<br/>JSON payloads, append-only)]
     B --> C(transform.py<br/>typing, dedupe, market date)
     C --> D{validate.py<br/>data quality checks}
     D -->|errors| X[run marked failed_validation<br/>clean table untouched]
-    D -->|pass| E[(daily_quotes<br/>PK snapshot_date, ticker)]
-    E --> V[[latest_quotes view]]
-    B & D & E --> P[(pipeline_runs<br/>audit log)]
+    D -->|pass| E[(daily_quotes/<br/>one Parquet file per day)]
+    E --> V[[DuckDB views<br/>daily_quotes, latest_quotes]]
+    B & D & E --> P[(pipeline_runs/<br/>one Parquet file per run)]
 ```
 
-| Layer | Table | Purpose |
-|---|---|---|
-| Raw | `raw.quotes_raw` | Every payload exactly as received, for replay and debugging |
-| Clean | `daily_quotes` | Typed rows, one per trading day per ticker, full history |
-| Serving | `latest_quotes` (view) | Most recent snapshot, ranked |
-| Ops | `pipeline_runs` | Status, data source, row counts, and quality issues for every run |
+The warehouse is plain files. DuckDB is only the query engine: it reads the files directly, so there is no database file to keep in sync.
+
+```
+warehouse/
+  daily_quotes/2026-10-27.parquet          clean rows, one file per trading day (~3 KB)
+  pipeline_runs/<time>_<run_id>.parquet    one row per run: the audit log
+  raw/<time>_<run_id>.jsonl.gz             every API payload exactly as received
+  latest.csv                               the newest day, in the original stocks.txt format
+```
+
+| Layer | SQL name | Files | Purpose |
+|---|---|---|---|
+| Raw | `raw_quotes` | `raw/` | Every payload exactly as received, for replay and debugging |
+| Clean | `daily_quotes` | `daily_quotes/` | Typed rows, one per ticker per trading day, full history |
+| Serving | `latest_quotes` | (view) | Most recent snapshot, ranked |
+| Ops | `pipeline_runs` | `pipeline_runs/` | Status, data source, row counts, and quality issues for every run |
+
+Each run replaces only its own day's file (written to a temp file, then renamed), so reruns are idempotent. The same layout works unchanged in cloud object storage such as Amazon S3.
 
 ## What changed from v1
 
@@ -35,13 +47,14 @@ flowchart LR
 |---|---|
 | CNN Selenium scrape failed on every run and **silently** used a hardcoded ticker list | Yahoo screener API returns tickers and stats in one call; any fallback is logged and recorded as `source='fallback'` |
 | Yahoo HTML parsing broke whenever the page markup changed | Structured JSON via `yfinance`, with field mapping for both payload shapes |
-| `DROP TABLE` on every run destroyed all history | Partition overwrite by `snapshot_date`: reruns are idempotent and history accumulates |
+| `DROP TABLE` on every run destroyed all history | One file per trading day, replaced atomically: reruns are idempotent and history accumulates |
+| One binary database file, rewritten every day | Small, standard Parquet files: readable by any tool, diff-friendly in git, ready for cloud storage |
 | No retries | Exponential backoff on every network call |
 | No data validation | Quality checks (row count, uniqueness, ticker format, positive prices, completeness, stale quotes) block or flag bad batches |
 | Ran only when someone opened the notebook | Runs automatically every weekday on GitHub Actions |
 | Dates were never stored | Each row is stamped with the **New York trading date** from the quote timestamp |
 | One 400-line notebook cell | Separate extract / transform / validate / load modules, a CLI, and config via environment variables |
-| No tests | 19 pytest tests with Yahoo mocked, run in GitHub Actions CI with ruff linting |
+| No tests | 26 pytest tests with Yahoo mocked, run in GitHub Actions CI with ruff linting |
 
 ## Quickstart
 
@@ -51,27 +64,28 @@ python -m venv .venv
 pip install -e ".[dev]"
 
 pytest                           # run the test suite (no network needed)
-stock-pipeline                   # run the pipeline once -> data/stocks.duckdb
+stock-pipeline                   # run the pipeline once -> data/warehouse/
 stock-pipeline --export-csv stocks.txt   # also write the original stocks.txt format
 ```
 
-Inspect the warehouse:
+Query the history the daily job has committed to `warehouse/` (run `git pull` first to get the newest days):
 
 ```bash
-python -c "import duckdb; duckdb.connect('data/stocks.duckdb').sql('SELECT * FROM latest_quotes').show()"
+stock-query                                        # today's 25 stocks
+stock-query "SELECT snapshot_date, count(*) FROM daily_quotes GROUP BY 1 ORDER BY 1"
+stock-query --file sql/analysis.sql                # every example query
+stock-query --warehouse data/warehouse             # your own local runs instead
 ```
-
-Or install the [DuckDB CLI](https://duckdb.org/docs/installation/) and run `duckdb data/stocks.duckdb < sql/analysis.sql`.
 
 Import the data from the original notebook (one time):
 
 ```bash
-python scripts/backfill_legacy.py legacy/StocksDatabase.db --as-of 2026-10-09
+python scripts/backfill_legacy.py legacy/StocksDatabase.db --as-of 2026-10-09 --warehouse warehouse
 ```
 
 ### Scheduled runs
 
-[`.github/workflows/daily.yml`](.github/workflows/daily.yml) runs the pipeline every weekday after the market close (21:37 UTC). It commits the updated warehouse to [`warehouse/`](warehouse/), so the history builds up in the repo, and writes the run status and the day's snapshot to the job summary. [`warehouse/latest.csv`](warehouse/latest.csv) always holds the most recent snapshot. You can also start a run manually from the Actions tab with **Run workflow**.
+[`.github/workflows/daily.yml`](.github/workflows/daily.yml) runs the pipeline every weekday after the market close (21:37 UTC). It commits the new day's files to [`warehouse/`](warehouse/), so the history builds up in the repo, and writes the run status and the day's snapshot to the job summary. [`warehouse/latest.csv`](warehouse/latest.csv) always holds the most recent snapshot. You can also start a run manually from the Actions tab with **Run workflow**.
 
 ### Docker
 
@@ -84,7 +98,7 @@ docker run --rm -v "$(pwd)/data:/data" stock-pipeline
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STOCKS_DB_PATH` | `data/stocks.duckdb` | Warehouse file |
+| `STOCKS_WAREHOUSE_DIR` | `data/warehouse` | Warehouse folder (the daily job uses `warehouse`) |
 | `STOCKS_SCREENER` | `most_actives` | Any Yahoo predefined screener (`day_gainers`, `day_losers`, …) |
 | `STOCKS_TOP_N` | `25` | How many stocks to capture |
 | `STOCKS_MIN_ROWS` | `5` | Fewer rows than this fails validation |
@@ -114,5 +128,6 @@ A missing P/E is valid: companies with negative trailing earnings (e.g. INTC) do
 - [x] Daily schedule after market close (GitHub Actions cron)
 - [ ] Move orchestration to Dagster or Airflow
 - [ ] dbt models on top of `daily_quotes` (ticker dimension, rolling volume metrics)
-- [ ] Move storage to cloud object storage (Parquet on S3/GCS) or MotherDuck
+- [x] Parquet file storage (v0.3; existing history migrated automatically)
+- [ ] Move the Parquet files to Amazon S3, query with Athena
 - [ ] Dashboard (Streamlit or Evidence)

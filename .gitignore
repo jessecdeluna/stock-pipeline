@@ -9,6 +9,4 @@ data/
 *.duckdb.wal
 .ipynb_checkpoints/
 stocks.txt
-
-# The scheduled GitHub Action commits the warehouse so history persists between runs
-!warehouse/stocks.duckdb
+*.parquet.tmp

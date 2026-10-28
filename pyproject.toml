@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stock-pipeline"
-version = "0.2.0"
+version = "0.3.0"
 description = "Daily ELT pipeline for the most-active US stocks"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 stock-pipeline = "stock_pipeline.pipeline:main"
+stock-query = "stock_pipeline.query:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

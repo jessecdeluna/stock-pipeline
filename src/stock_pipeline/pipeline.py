@@ -1,8 +1,8 @@
-"""Orchestrates one pipeline run: extract -> raw load -> transform -> validate -> clean load.
+"""Orchestrates one pipeline run: extract -> raw -> transform -> validate -> clean.
 
 Usage:
-    python -m stock_pipeline.pipeline             # run once
-    python -m stock_pipeline.pipeline --export-csv stocks.txt
+    stock-pipeline                          # run once (writes to data/warehouse by default)
+    stock-pipeline --export-csv stocks.txt  # also write the latest day as CSV
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 from . import extract as ex
 from .config import Settings
-from .load import connect, load_clean, load_raw, record_run
+from .load import Warehouse, connect, migrate_legacy_db, record_run, write_clean, write_raw
 from .transform import transform
 from .validate import has_errors, validate
 
@@ -25,16 +25,20 @@ log = logging.getLogger("stock_pipeline")
 
 def run(settings: Settings | None = None) -> dict:
     settings = settings or Settings()
+    wh = Warehouse(settings.warehouse_dir)
+    migrated = migrate_legacy_db(wh)
+    if migrated:
+        log.info("Migrated %d trading days from stocks.duckdb to Parquet files", migrated)
+
     run_id = uuid.uuid4().hex[:12]
     started = datetime.now(UTC)
-    con = connect(settings.db_path)
     source, raw_count, loaded, issues, status = None, 0, 0, [], "failed"
 
     try:
         result = ex.extract(settings.screener, settings.top_n,
                             settings.fallback_tickers, settings.max_retries)
         source, raw_count = result.source, len(result.records)
-        load_raw(con, run_id, started, source, result.records)
+        write_raw(wh, run_id, started, source, result.records)
 
         rows = transform(result.records, started)
         issues = validate(rows, settings.min_rows)
@@ -44,7 +48,7 @@ def run(settings: Settings | None = None) -> dict:
         if has_errors(issues):
             status = "failed_validation"
         else:
-            loaded = load_clean(con, run_id, datetime.now(UTC), rows)
+            loaded = write_clean(wh, run_id, datetime.now(UTC), rows)
             status = "success"
         return {"run_id": run_id, "status": status, "source": source,
                 "rows_extracted": raw_count, "rows_loaded": loaded,
@@ -53,17 +57,16 @@ def run(settings: Settings | None = None) -> dict:
         log.exception("Pipeline run %s crashed", run_id)
         raise
     finally:
-        record_run(con, run_id=run_id, started_at=started, finished_at=datetime.now(UTC),
+        record_run(wh, run_id=run_id, started_at=started, finished_at=datetime.now(UTC),
                    status=status, source=source, rows_extracted=raw_count,
                    rows_loaded=loaded, issues=issues)
         log.info("Run %s finished: status=%s source=%s extracted=%d loaded=%d",
                  run_id, status, source, raw_count, loaded)
-        con.close()
 
 
-def export_csv(db_path: str, path: str) -> None:
+def export_csv(warehouse_dir: str, path: str) -> None:
     """Write the latest snapshot in the original stocks.txt format."""
-    con = connect(db_path)
+    con = connect(warehouse_dir)
     rows = con.execute(
         "SELECT ticker, open_price, avg_volume, pe_ratio FROM latest_quotes"
     ).fetchall()
@@ -86,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     summary = run(settings)
     if args.export_csv and summary["status"] == "success":
-        export_csv(settings.db_path, args.export_csv)
+        export_csv(settings.warehouse_dir, args.export_csv)
     return 0 if summary["status"] == "success" else 1
 
 

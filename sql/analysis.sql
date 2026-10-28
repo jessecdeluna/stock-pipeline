@@ -1,5 +1,5 @@
 -- Example questions the warehouse can answer once a few weeks of history build up.
--- Run with:  duckdb data/stocks.duckdb < sql/analysis.sql
+-- Run with:  stock-query --file sql/analysis.sql
 
 -- 1. Which tickers show up on the most-actives list most often?
 SELECT ticker, count(*) AS days_on_list, round(avg(rank), 1) AS avg_rank
